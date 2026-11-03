@@ -1,0 +1,94 @@
+name: Build RustXNG Linux ARM64
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_COMMIT: 08338038491d57adcfa4990ddf3d8925af292f4e
+  TARGET: aarch64-unknown-linux-gnu
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Check out pinned official RustXNG source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: sahenjp/RustXNG
+          ref: 08338038491d57adcfa4990ddf3d8925af292f4e
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable action, pinned
+        with:
+          toolchain: 1.99.1
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Verify source and native runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(uname -m)" = "aarch64"
+          printf 'Source: %s\nTarget: %s\nRunner: %s\n' "$SOURCE_COMMIT" "$TARGET" "$(uname -m)"
+          rustc --version
+          cargo --version
+          getconf GNU_LIBC_VERSION
+
+      - name: Build locked release binary
+        shell: bash
+        run: cargo build --release --locked --target "$TARGET" --bin rustxng
+
+      - name: Verify ARM64 binary and offline smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v file >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y file
+          fi
+          binary="target/$TARGET/release/rustxng"
+          test -s "$binary"
+          file "$binary"
+          file "$binary" | grep -qi aarch64
+          "$binary" --version
+          python3 tools/smoke_agent_setup.py --binary "$binary"
+
+      - name: Package binary, checksum, license, and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/$TARGET/release/rustxng"
+          mkdir -p dist
+          install -m 0755 "$binary" dist/rustxng-aarch64-unknown-linux-gnu
+          install -m 0644 LICENSE dist/LICENSE
+          install -m 0644 NOTICE dist/NOTICE
+          printf '%s\n' "$SOURCE_COMMIT" > dist/SOURCE_COMMIT
+          {
+            printf 'source_repository=https://github.com/sahenjp/RustXNG\n'
+            printf 'source_commit=%s\n' "$SOURCE_COMMIT"
+            printf 'target=%s\n' "$TARGET"
+            printf 'runner_arch=%s\n' "$(uname -m)"
+            printf 'runner_label=ubuntu-24.04-arm\n'
+            printf 'glibc=%s\n' "$(getconf GNU_LIBC_VERSION)"
+            printf 'rustc=%s\n' "$(rustc --version)"
+            printf 'cargo=%s\n' "$(cargo --version)"
+            printf 'workflow_run_id=%s\n' "$GITHUB_RUN_ID"
+          } > dist/BUILD_INFO.txt
+          (cd dist && sha256sum rustxng-aarch64-unknown-linux-gnu > rustxng-aarch64-unknown-linux-gnu.sha256)
+          cat dist/rustxng-aarch64-unknown-linux-gnu.sha256
+          cat dist/BUILD_INFO.txt
+
+      - name: Upload verified build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rustxng-linux-arm64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
